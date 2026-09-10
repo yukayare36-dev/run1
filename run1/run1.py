@@ -18,7 +18,7 @@ def run_command(command, cwd=None):
 
 def main():
     # 1. Clone the repository
-    repo_url = "https://github.com/maaromaaro50/1.git"
+    repo_url = "https://github.com/yukayare36-cell/1.git"
     print(f"Cloning repository: {repo_url}")
     
     if not run_command(f"git clone {repo_url}"):
