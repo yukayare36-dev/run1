@@ -1,53 +1,93 @@
-const { execSync } = require('child_process');
+const { spawn, execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const express = require('express');
 
-function runCommand(command, cwd = process.cwd()) {
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+const repoPath = path.resolve(__dirname, '1');
+const binaryName = '1';
+const binaryPath = path.join(repoPath, binaryName);
+
+// ---- in-memory log buffer (last 500 lines) ----
+const MAX_LINES = 500;
+const logBuffer = [];
+const clients = new Set();
+
+function broadcast(line) {
+  logBuffer.push(line);
+  if (logBuffer.length > MAX_LINES) logBuffer.shift();
+  for (const res of clients) {
+    res.write(`data: ${JSON.stringify(line)}\n\n`);
+  }
+}
+
+// ---- prepare and launch the binary ----
+function launchBinary() {
+  if (!fs.existsSync(repoPath)) {
+    broadcast(`❌ Directory not found: ${repoPath}`);
+    return;
+  }
+  if (!fs.existsSync(binaryPath)) {
+    broadcast(`❌ Executable not found: ${binaryPath}`);
+    return;
+  }
+
   try {
-    const output = execSync(command, { cwd, encoding: 'utf-8', stdio: 'pipe' });
-    console.log(`✅ Command succeeded: ${command}`);
-    if (output) console.log(output);
-    return true;
+    execSync(`chmod +x ${binaryName}`, { cwd: repoPath });
+    broadcast(`✅ Made '${binaryName}' executable`);
   } catch (err) {
-    console.error(`❌ Command failed: ${command}`);
-    console.error(`Error: ${err.stderr || err.message}`);
-    return false;
+    broadcast(`⚠️ chmod failed: ${err.message}`);
   }
+
+  broadcast(`🚀 Starting ./${binaryName} ...`);
+  const child = spawn(`./${binaryName}`, [], { cwd: repoPath });
+
+  child.stdout.on('data', (d) => {
+    d.toString().split('\n').filter(Boolean).forEach(broadcast);
+  });
+  child.stderr.on('data', (d) => {
+    d.toString().split('\n').filter(Boolean).forEach((l) => broadcast(`[stderr] ${l}`));
+  });
+  child.on('close', (code) => {
+    broadcast(`⚠️ Process exited with code ${code}`);
+  });
+  child.on('error', (err) => {
+    broadcast(`❌ Spawn error: ${err.message}`);
+  });
 }
 
-function main() {
-  const repoUrl = 'https://github.com/yukayare36-dev/1.git';
-  console.log(`Cloning repository: ${repoUrl}`);
+// ---- web UI ----
+app.use(express.static(path.join(__dirname, 'public')));
 
-  // 1. Clone the repository
-  if (!runCommand(`git clone ${repoUrl}`)) {
-    process.exit(1);
+// SSE stream of logs
+app.get('/api/logs', (req, res) => {
+  res.set({
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+  });
+  res.flushHeaders();
+
+  // replay buffered logs
+  for (const line of logBuffer) {
+    res.write(`data: ${JSON.stringify(line)}\n\n`);
   }
 
-  // 2. Move into the directory
-  const repoDir = '1';
-  console.log(`Changing directory to: ${repoDir}`);
+  clients.add(res);
+  req.on('close', () => clients.delete(res));
+});
 
-  if (!fs.existsSync(repoDir)) {
-    console.error(`❌ Directory '${repoDir}' not found after cloning`);
-    process.exit(1);
-  }
+app.get('/api/status', (req, res) => {
+  res.json({
+    repoPath,
+    binaryExists: fs.existsSync(binaryPath),
+    lines: logBuffer.length,
+  });
+});
 
-  const repoPath = path.resolve(repoDir);
-
-  // 3. Make the file executable
-  console.log("Making file '1' executable...");
-  if (!runCommand('chmod +x 1', repoPath)) {
-    process.exit(1);
-  }
-
-  // 4. Run the executable
-  console.log('Running ./1...');
-  console.log('-'.repeat(50));
-  if (!runCommand('./1', repoPath)) {
-    process.exit(1);
-  }
-  console.log('-'.repeat(50));
-}
-
-main();
+app.listen(PORT, () => {
+  console.log(`🌐 Web UI listening on port ${PORT}`);
+  launchBinary();
+});
