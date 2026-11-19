@@ -1,0 +1,10 @@
+{
+  "name": "my-bonto-app",
+  "version": "1.0.0",
+  "scripts": {
+    "start": "node run1.js"
+  },
+  "dependencies": {
+    "express": "^4.18.0"
+  }
+}
