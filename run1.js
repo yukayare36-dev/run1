@@ -1,166 +1,119 @@
-const { spawn, execSync } = require('child_process');
-const fs = require('fs');
-const path = require('path');
-const express = require('express');
-const iconv = require('iconv-lite');
+
+const express = require("express");
+const { Builder, By, until } = require("selenium-webdriver");
+const chrome = require("selenium-webdriver/chrome");
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+app.use(express.json());
 
-const repoPath = path.resolve(__dirname, '1');
-const binaryName = '1';
-const binaryPath = path.join(repoPath, binaryName);
+app.get("/", (req, res) => {
+    res.send("Bonto Selenium Browser is running!");
+});
 
-// ---- config ----
-const MAX_LINES = 500;
-const ANSI_RE = /\x1b\[[0-9;?]*[ -\/]*[@-~]/g;   // CSI sequences
-const ANSI_OSC_RE = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g; // OSC sequences
-const ENCODING = process.env.BINARY_ENCODING || 'utf8'; // 'utf8' | 'gbk' | 'latin1' ...
-const USE_PTY = process.env.USE_PTY === '1';
+app.get("/visit", async (req, res) => {
+    const url = req.query.url;
 
-// ---- state ----
-const logBuffer = [];
-const clients = new Set();
-let lastBroadcast = 0;
-
-// ---- helpers ----
-function stripAnsi(s) {
-  return s.replace(ANSI_OSC_RE, '').replace(ANSI_RE, '');
-}
-
-function decodeChunk(buf) {
-  if (ENCODING === 'utf8' || ENCODING === 'utf-8') return buf.toString('utf8');
-  return iconv.decode(buf, ENCODING);
-}
-
-// split a decoded chunk into lines, carrying over partial lines between chunks
-let stdoutCarry = '';
-let stderrCarry = '';
-
-function pushLines(chunk, carryRef, prefix = '') {
-  const text = carryRef.value + chunk;
-  const parts = text.split(/\r?\n/);
-  carryRef.value = parts.pop(); // last piece may be incomplete
-  for (const line of parts) {
-    const clean = stripAnsi(line);
-    if (clean.trim()) broadcast(prefix + clean);
-  }
-}
-
-const outCarry = { value: '' };
-const errCarry = { value: '' };
-
-function broadcast(line) {
-  logBuffer.push(line);
-  if (logBuffer.length > MAX_LINES) logBuffer.shift();
-  for (const res of clients) {
-    try { res.write(`data: ${JSON.stringify(line)}\n\n`); } catch {}
-  }
-}
-
-// ---- launch ----
-function launchBinary() {
-  if (!fs.existsSync(repoPath)) {
-    broadcast(`❌ Directory not found: ${repoPath}`);
-    return;
-  }
-  if (!fs.existsSync(binaryPath)) {
-    broadcast(`❌ Executable not found: ${binaryPath}`);
-    return;
-  }
-
-  try {
-    execSync(`chmod +x ${binaryName}`, { cwd: repoPath });
-    broadcast(`✅ Made '${binaryName}' executable`);
-  } catch (err) {
-    broadcast(`⚠️ chmod failed: ${err.message}`);
-  }
-
-  broadcast(`🚀 Starting ./${binaryName} (encoding=${ENCODING}) ...`);
-
-  let child;
-  if (USE_PTY) {
-    // optional: real TTY, better for programs that demand one
-    let pty;
-    try { pty = require('node-pty'); }
-    catch { broadcast('⚠️ USE_PTY=1 but node-pty not installed'); return; }
-    child = pty.spawn(`./${binaryName}`, [], {
-      cwd: repoPath,
-      name: 'xterm-color',
-      cols: 120,
-      rows: 40,
-      env: process.env,
-    });
-    child.onData((d) => {
-      pushLines(d, outCarry);
-    });
-    child.onExit(({ exitCode, signal }) => {
-      broadcast(`⚠️ Process exited with code ${exitCode}${signal ? `, signal: ${signal}` : ''}`);
-    });
-    return;
-  }
-
-  // normal spawn
-  child = spawn(`./${binaryName}`, [], {
-    cwd: repoPath,
-    env: process.env,
-  });
-
-  child.stdout.on('data', (buf) => {
-    pushLines(decodeChunk(buf), outCarry);
-  });
-  child.stderr.on('data', (buf) => {
-    pushLines(decodeChunk(buf), errCarry, '[stderr] ');
-  });
-
-  child.on('close', (code, signal) => {
-    // flush partial lines
-    if (outCarry.value) { broadcast(stripAnsi(outCarry.value)); outCarry.value = ''; }
-    if (errCarry.value) { broadcast('[stderr] ' + stripAnsi(errCarry.value)); errCarry.value = ''; }
-
-    if (code === null && signal) {
-      broadcast(`⚠️ Process killed by signal: ${signal}`);
-    } else {
-      broadcast(`⚠️ Process exited with code ${code}`);
+    if (!url) {
+        return res.status(400).json({
+            error: "URL required"
+        });
     }
-  });
 
-  child.on('error', (err) => {
-    broadcast(`❌ Spawn error: ${err.message}`);
-  });
-}
+    let parsed;
 
-// ---- web UI ----
-app.use(express.static(path.join(__dirname, 'public')));
+    try {
+        parsed = new URL(url);
+    } catch {
+        return res.status(400).json({
+            error: "Invalid URL"
+        });
+    }
 
-app.get('/api/logs', (req, res) => {
-  res.set({
-    'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache',
-    Connection: 'keep-alive',
-    'X-Accel-Buffering': 'no',
-  });
-  res.flushHeaders();
+    if (!["http:", "https:"].includes(parsed.protocol)) {
+        return res.status(400).json({
+            error: "Only HTTP and HTTPS are allowed"
+        });
+    }
 
-  for (const line of logBuffer) {
-    res.write(`data: ${JSON.stringify(line)}\n\n`);
-  }
+    let driver;
 
-  clients.add(res);
-  req.on('close', () => clients.delete(res));
+    try {
+        const options = new chrome.Options();
+
+        options.addArguments(
+            "--headless=new",
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--window-size=1365,768"
+        );
+
+        driver = await new Builder()
+            .forBrowser("chrome")
+            .setChromeOptions(options)
+            .build();
+
+        await driver.manage().setTimeouts({
+            pageLoad: 60000,
+            script: 30000
+        });
+
+        console.log("Visiting:", url);
+
+        // Open website
+        await driver.get(url);
+
+        // Wait for document to finish loading
+        await driver.wait(async () => {
+            return await driver.executeScript(
+                "return document.readyState"
+            ) === "complete";
+        }, 60000);
+
+        // Wait for body
+        await driver.wait(
+            until.elementLocated(By.css("body")),
+            30000
+        );
+
+        // Get fully rendered website
+        const result = await driver.executeScript(`
+            return {
+                title: document.title,
+                url: location.href,
+                html: document.documentElement.outerHTML,
+                text: document.body.innerText,
+                readyState: document.readyState,
+                userAgent: navigator.userAgent
+            };
+        `);
+
+        // Screenshot
+        const screenshot = await driver.takeScreenshot();
+
+        console.log("Website loaded:", result.title);
+
+        res.json({
+            status: "success",
+            website: result,
+            screenshot: screenshot
+        });
+
+    } catch (error) {
+        console.error(error);
+
+        res.status(500).json({
+            status: "error",
+            message: error.message
+        });
+
+    } finally {
+        if (driver) {
+            await driver.quit();
+        }
+    }
 });
 
-app.get('/api/status', (req, res) => {
-  res.json({
-    repoPath,
-    binaryExists: fs.existsSync(binaryPath),
-    encoding: ENCODING,
-    usePty: USE_PTY,
-    lines: logBuffer.length,
-  });
-});
-
-app.listen(PORT, () => {
-  console.log(`🌐 Web UI listening on port ${PORT}`);
-  launchBinary();
+app.listen(3000, () => {
+    console.log("Bonto running on port 3000");
 });
